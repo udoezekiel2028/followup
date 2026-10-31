@@ -437,16 +437,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ onSettingsSaved }) =
           <div>
             {/* AI Model */}
             <label className="text-xs font-semibold text-slate-300 block mb-1">
-              OpenAI Model:
+              AI Copywriting Model (Anthropic Claude & OpenAI):
             </label>
             <select
               value={settings.ai_model}
               onChange={(e) => setSettings({ ...settings, ai_model: e.target.value })}
               className="w-full sm:w-1/2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white focus:border-blue-500 focus:outline-none"
             >
-              <option value="gpt-4o-mini">gpt-4o-mini (Fast & High Quality - Recommended)</option>
-              <option value="gpt-4o">gpt-4o (Most Intelligent)</option>
-              <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+              <optgroup label="Anthropic Claude (Fast & High Persuasion)">
+                <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku (Fast, Natural, Concise - Recommended)</option>
+                <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet (Executive Thought-Leadership)</option>
+                <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+              </optgroup>
+              <optgroup label="OpenAI">
+                <option value="gpt-4o-mini">gpt-4o-mini (Fast & Efficient)</option>
+                <option value="gpt-4o">gpt-4o (High Intelligence)</option>
+                <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+              </optgroup>
             </select>
           </div>
 

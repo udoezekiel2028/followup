@@ -17,8 +17,11 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_KEY: Optional[str] = None
     DATABASE_URL: Optional[str] = None # sqlite:///./cold_email.db fallback
 
-    # OpenAI API
+    # AI Providers (Anthropic Claude & OpenAI)
+    ANTHROPIC_API_KEY: Optional[str] = None
+    CLAUDE_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    ANTHROPIC_DEFAULT_MODEL: str = "claude-3-5-haiku-20241022"
     OPENAI_DEFAULT_MODEL: str = "gpt-4o-mini"
 
     # Google OAuth 2.0
