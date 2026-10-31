@@ -225,7 +225,15 @@ def track_sent_email_manually(payload: Dict[str, str], db: Session = Depends(get
     if not account or account.connection_status not in ["CONNECTED", "ACTIVE"]:
         raise HTTPException(status_code=400, detail="No active email account connected")
 
-    tracked = GmailMonitorService.track_conversation(account, thread_id, db, manual=True)
+    if (account.provider_type or "GMAIL").upper() == "GMAIL":
+        tracked = GmailMonitorService.track_conversation(account, thread_id, db, manual=True)
+    else:
+        provider = get_email_provider(account)
+        if hasattr(provider, "track_sent_message"):
+            tracked = provider.track_sent_message(thread_id, db, manual=True)
+        else:
+            tracked = None
+
     if not tracked:
         raise HTTPException(status_code=400, detail="Could not track thread from mailbox")
 

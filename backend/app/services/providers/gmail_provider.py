@@ -188,14 +188,23 @@ class GmailEmailProvider(BaseEmailProvider):
 
     # 9. synchronize_mailbox
     def synchronize_mailbox(self, db: Session) -> Dict[str, Any]:
-        """Synchronizes mailbox state and updates timestamp."""
+        """Synchronizes Gmail sent emails and replies."""
+        from app.services.gmail_monitor import GmailMonitorService
+        stats = {"identified_cold_emails": 0}
+        try:
+            stats = GmailMonitorService.sync_sent_messages(self.account, db, max_results=30)
+        except Exception as e:
+            stats["error"] = str(e)
+
         self.account.last_sync_at = utc_now()
         db.commit()
         return {
             "account_id": self.account.id,
             "email_address": self.account.email_address,
             "last_sync_at": self.account.last_sync_at.isoformat(),
-            "status": self.account.connection_status
+            "status": self.account.connection_status,
+            "identified_cold_emails": stats.get("identified_cold_emails", 0),
+            "stats": stats
         }
 
     # 10. get_message_status

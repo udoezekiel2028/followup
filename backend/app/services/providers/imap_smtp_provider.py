@@ -388,25 +388,8 @@ class ImapSmtpEmailProvider(HostingerEmailProvider):
         }
 
     def sync_sent_emails(self, db: Session, max_results: int = 20) -> List[Dict[str, Any]]:
-        """Returns recently sent outreach emails for Sent Explorer."""
-        # Query outbound messages stored for this account
-        messages = db.query(EmailMessageModel).filter(
-            EmailMessageModel.sending_account_id == self.account.id,
-            EmailMessageModel.message_type == "OUTBOUND_INITIAL"
-        ).order_by(EmailMessageModel.sent_at.desc()).limit(max_results).all()
-
-        results = []
-        for m in messages:
-            th = db.query(EmailThreadModel).filter(EmailThreadModel.id == m.thread_record_id).first()
-            results.append({
-                "gmail_message_id": m.gmail_message_id,
-                "gmail_thread_id": th.gmail_thread_id if th else m.gmail_message_id,
-                "recipient_name": th.prospect.name if (th and th.prospect) else "",
-                "recipient_email": m.recipient,
-                "subject": m.subject or "Outreach",
-                "date": m.sent_at.isoformat(),
-                "snippet": m.body[:120] if m.body else "",
-                "is_already_tracked": True,
-                "sending_account": self.account.email_address
-            })
-        return results
+        """
+        Synchronizes IMAP Sent folder into database and returns recent sent emails for Sent Explorer.
+        Delegates to production HostingerEmailProvider logic with dynamic folder discovery and ingestion.
+        """
+        return super().sync_sent_emails(db=db, max_results=max_results)

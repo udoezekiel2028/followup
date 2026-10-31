@@ -119,9 +119,13 @@ def connect_smtp_imap_account(payload: ConnectSmtpImapPayload, db: Session = Dep
     }
     encrypted_creds = encrypt_credentials(creds_dict)
 
+    smtp_host_clean = payload.smtp_host.strip().lower()
+    imap_host_clean = payload.imap_host.strip().lower()
+    provider_type = "HOSTINGER" if ("hostinger" in smtp_host_clean or "hostinger" in imap_host_clean) else "SMTP_IMAP"
+
     if existing:
         account = existing
-        account.provider_type = "SMTP_IMAP"
+        account.provider_type = provider_type
         account.authentication_type = "PASSWORD"
         account.provider_account_identifier = payload.smtp_host.strip()
         account.encrypted_credentials = encrypted_creds
@@ -131,7 +135,7 @@ def connect_smtp_imap_account(payload: ConnectSmtpImapPayload, db: Session = Dep
     else:
         account = ConnectedEmailAccountModel(
             email_address=email_clean,
-            provider_type="SMTP_IMAP",
+            provider_type=provider_type,
             provider_account_identifier=payload.smtp_host.strip(),
             authentication_type="PASSWORD",
             encrypted_credentials=encrypted_creds,
@@ -150,6 +154,20 @@ def connect_smtp_imap_account(payload: ConnectSmtpImapPayload, db: Session = Dep
     if not healthy:
         account.connection_status = "ERROR"
         db.commit()
+    else:
+        # Immediately synchronize outbound sent emails so existing outreach appears right away
+        try:
+            sync_res = provider.synchronize_mailbox(db)
+            new_synced = sync_res.get("identified_cold_emails", 0)
+            log_sync = ActivityLogModel(
+                user_id=account.user_id,
+                action="INITIAL_MAILBOX_SYNC",
+                description=f"Initial mailbox sync for {account.email_address}: {new_synced} cold emails imported."
+            )
+            db.add(log_sync)
+            db.commit()
+        except Exception as e:
+            print(f"[Initial Mailbox Sync Error] {e}")
 
     log = ActivityLogModel(
         user_id=account.user_id,

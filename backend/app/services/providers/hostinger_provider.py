@@ -2,16 +2,19 @@ import imaplib
 import smtplib
 import ssl
 import email
+import email.header
+import re
 from email.message import EmailMessage
-from email.utils import parseaddr, formatdate
-from datetime import datetime, timezone
+from email.utils import parseaddr, formatdate, parsedate_to_datetime
+from datetime import datetime, timezone, timedelta
 import uuid
 from typing import Tuple, Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 
 from app.database import (
     ConnectedEmailAccountModel, EmailThreadModel, EmailMessageModel, 
-    FollowUpLogModel, SuppressionModel, ActivityLogModel, utc_now
+    FollowUpLogModel, SuppressionModel, ActivityLogModel, ProspectModel,
+    AutomationSettingsModel, utc_now
 )
 from app.security import decrypt_credentials, encrypt_credentials
 from app.services.providers.base_provider import BaseEmailProvider
@@ -314,6 +317,131 @@ class HostingerEmailProvider(BaseEmailProvider):
             "is_test_mode": False
         }
 
+    @classmethod
+    def find_sent_folder(cls, imap: imaplib.IMAP4_SSL) -> str:
+        """
+        Dynamically discovers the Sent mailbox folder name on Dovecot/Hostinger/cPanel.
+        Handles RFC 6154 flags (\\Sent), dot/slash delimiters, and candidate fallbacks.
+        """
+        try:
+            status, folders = imap.list()
+            if status == "OK" and folders:
+                # 1. Look for folder with \Sent attribute flag
+                for f in folders:
+                    if not f:
+                        continue
+                    f_str = f.decode("utf-8", errors="ignore") if isinstance(f, bytes) else str(f)
+                    if r"\sent" in f_str.lower():
+                        match = re.search(r'\((.*?)\)\s+(?:"(.*?)"|(\S+))\s+(?:"(.*?)"|(\S+))$', f_str)
+                        if match:
+                            folder_name = match.group(4) or match.group(5)
+                            if folder_name:
+                                folder_clean = folder_name.strip('"')
+                                try:
+                                    res, _ = imap.select(f'"{folder_clean}"', readonly=True)
+                                    if res == "OK":
+                                        return folder_clean
+                                    res, _ = imap.select(folder_clean, readonly=True)
+                                    if res == "OK":
+                                        return folder_clean
+                                except Exception:
+                                    pass
+
+                # 2. Look for folder with 'sent' in its name
+                for f in folders:
+                    if not f:
+                        continue
+                    f_str = f.decode("utf-8", errors="ignore") if isinstance(f, bytes) else str(f)
+                    if "sent" in f_str.lower():
+                        match = re.search(r'\((.*?)\)\s+(?:"(.*?)"|(\S+))\s+(?:"(.*?)"|(\S+))$', f_str)
+                        if match:
+                            folder_name = match.group(4) or match.group(5)
+                            if folder_name:
+                                folder_clean = folder_name.strip('"')
+                                try:
+                                    res, _ = imap.select(f'"{folder_clean}"', readonly=True)
+                                    if res == "OK":
+                                        return folder_clean
+                                    res, _ = imap.select(folder_clean, readonly=True)
+                                    if res == "OK":
+                                        return folder_clean
+                                except Exception:
+                                    pass
+        except Exception as e:
+            print(f"[Hostinger find_sent_folder imap.list error] {e}")
+
+        # 3. Known candidate folder names on Hostinger/Dovecot/cPanel
+        candidates = [
+            "INBOX.Sent",
+            "INBOX/Sent",
+            "Sent",
+            "Sent Messages",
+            "Sent Items",
+            "INBOX.Sent Items",
+            "INBOX/Sent Items",
+            "INBOX.Sent Messages",
+            "INBOX/Sent Messages",
+        ]
+        for c in candidates:
+            try:
+                res, _ = imap.select(f'"{c}"', readonly=True)
+                if res == "OK":
+                    return c
+                res, _ = imap.select(c, readonly=True)
+                if res == "OK":
+                    return c
+            except Exception:
+                continue
+
+        return "INBOX.Sent"
+
+    @staticmethod
+    def _decode_mime_header(val: Optional[str]) -> str:
+        if not val:
+            return ""
+        try:
+            decoded_parts = email.header.decode_header(val)
+            res = []
+            for content, enc in decoded_parts:
+                if isinstance(content, bytes):
+                    res.append(content.decode(enc or "utf-8", errors="ignore"))
+                else:
+                    res.append(str(content))
+            return "".join(res).strip()
+        except Exception:
+            return str(val)
+
+    @staticmethod
+    def _extract_body_from_msg(parsed: email.message.Message) -> str:
+        body_text = ""
+        try:
+            if parsed.is_multipart():
+                for part in parsed.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition", ""))
+                    if "attachment" in content_disposition:
+                        continue
+                    if content_type == "text/plain":
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            body_text = payload.decode(charset, errors="ignore")
+                            break
+                    elif content_type == "text/html" and not body_text:
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            html_raw = payload.decode(charset, errors="ignore")
+                            body_text = re.sub(r'<[^>]+>', ' ', html_raw)
+            else:
+                payload = parsed.get_payload(decode=True)
+                if payload:
+                    charset = parsed.get_content_charset() or "utf-8"
+                    body_text = payload.decode(charset, errors="ignore")
+        except Exception:
+            pass
+        return body_text.strip()
+
     def _append_to_sent_folder(self, msg: EmailMessage, creds: Dict[str, Any]):
         """IMAP APPEND: Appends raw email to Hostinger's Sent folder."""
         try:
@@ -324,25 +452,10 @@ class HostingerEmailProvider(BaseEmailProvider):
 
             imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=10)
             imap.login(imap_user, imap_pass)
-
-            # Discover Sent folder name
-            sent_folder = "Sent"
-            try:
-                status, folders = imap.list()
-                if status == "OK":
-                    for f in folders:
-                        f_str = f.decode() if isinstance(f, bytes) else str(f)
-                        if "\\Sent" in f_str or "Sent Messages" in f_str or "Sent" in f_str:
-                            # Extract mailbox name
-                            parts = f_str.split(' "/" ')
-                            if len(parts) > 1:
-                                sent_folder = parts[1].strip('"').strip()
-                                break
-            except Exception:
-                pass
+            sent_folder = self.find_sent_folder(imap)
 
             raw_bytes = msg.as_bytes()
-            imap.append(sent_folder, '\\Seen', imaplib.Time2Internaldate(datetime.now()), raw_bytes)
+            imap.append(f'"{sent_folder}"' if ' ' in sent_folder else sent_folder, '\\Seen', imaplib.Time2Internaldate(datetime.now()), raw_bytes)
             imap.logout()
         except Exception as e:
             # Non-fatal logging: SMTP send succeeded even if IMAP append fails
@@ -355,7 +468,7 @@ class HostingerEmailProvider(BaseEmailProvider):
         Correlates with database to indicate which conversations are currently tracked.
         """
         creds = self._get_creds()
-        is_mock = creds.get("is_mock") or "mock" in self.account.email_address or creds.get("smtp_host") in ["mock", "test"]
+        is_mock = creds.get("is_mock") or "mock" in self.account.email_address or creds.get("smtp_host") in ["mock", "test", "localhost"]
 
         # Tracked message IDs in DB for correlation
         tracked_ids = set()
@@ -380,49 +493,30 @@ class HostingerEmailProvider(BaseEmailProvider):
                 imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=12)
                 imap.login(imap_user, imap_pass)
 
-                # Locate Sent folder dynamically
-                sent_folder = "Sent"
-                try:
-                    status, folders = imap.list()
-                    if status == "OK":
-                        for f in folders:
-                            f_str = f.decode() if isinstance(f, bytes) else str(f)
-                            if "\\Sent" in f_str or "Sent Messages" in f_str or "Sent" in f_str:
-                                parts = f_str.split(' "/" ')
-                                if len(parts) > 1:
-                                    sent_folder = parts[1].strip('"').strip()
-                                    break
-                except Exception:
-                    pass
+                sent_folder = self.find_sent_folder(imap)
+                imap.select(f'"{sent_folder}"' if ' ' in sent_folder else sent_folder, readonly=True)
 
-                imap.select(sent_folder)
                 res, data = imap.search(None, "ALL")
                 if res == "OK" and data[0]:
                     msg_nums = data[0].split()
                     for num in reversed(msg_nums[-max_results:]):
                         _, msg_data = imap.fetch(num, "(RFC822)")
-                        if msg_data and msg_data[0]:
+                        if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
                             parsed = email.message_from_bytes(msg_data[0][1])
-                            msg_id = parsed.get("Message-ID", str(uuid.uuid4()))
-                            clean_to = parseaddr(parsed.get("To", ""))[1]
-                            clean_name = parsed.get("To", "").split("<")[0].strip().replace('"', '')
-
-                            # Extract snippet
-                            body_text = ""
-                            if parsed.is_multipart():
-                                for part in parsed.walk():
-                                    if part.get_content_type() == "text/plain":
-                                        body_text = part.get_payload(decode=True).decode(errors="ignore")
-                                        break
-                            else:
-                                body_text = parsed.get_payload(decode=True).decode(errors="ignore")
+                            msg_id = (parsed.get("Message-ID") or "").strip() or f"<{uuid.uuid4()}@{self.account.email_address.split('@')[-1]}>"
+                            
+                            to_raw = parsed.get("To", "")
+                            clean_name, clean_to = parseaddr(to_raw)
+                            clean_name = self._decode_mime_header(clean_name)
+                            subject = self._decode_mime_header(parsed.get("Subject", "(No Subject)"))
+                            body_text = self._extract_body_from_msg(parsed)
 
                             items.append({
                                 "gmail_message_id": msg_id,
                                 "gmail_thread_id": msg_id,
                                 "recipient_name": clean_name or clean_to,
                                 "recipient_email": clean_to,
-                                "subject": parsed.get("Subject", "(No Subject)"),
+                                "subject": subject,
                                 "date": parsed.get("Date", datetime.now().isoformat()),
                                 "snippet": body_text[:120].strip() if body_text else "Outbound message from Hostinger Sent folder",
                                 "is_already_tracked": msg_id in tracked_ids,
@@ -458,6 +552,14 @@ class HostingerEmailProvider(BaseEmailProvider):
                 })
 
         return items
+
+    def sync_sent_emails(self, db: Session, max_results: int = 30) -> List[Dict[str, Any]]:
+        """
+        Synchronizes Sent mailbox into database, ingesting newly found cold emails,
+        then returns recent sent items for Sent Explorer.
+        """
+        self.synchronize_mailbox(db)
+        return self.fetch_sent_emails(max_results=max_results, db=db)
 
     # 6. fetch_inbox_emails
     def fetch_inbox_emails(self, max_results: int = 25, db: Optional[Session] = None) -> List[Dict[str, Any]]:
@@ -666,15 +768,345 @@ class HostingerEmailProvider(BaseEmailProvider):
 
     # 9. synchronize_mailbox
     def synchronize_mailbox(self, db: Session) -> Dict[str, Any]:
-        """Polls Hostinger IMAP and updates synchronization timestamp checkpoint."""
+        """
+        Automatic Ingestion Engine for Hostinger / Professional IMAP:
+        1. Connects to Hostinger IMAP.
+        2. Discovers and scans Sent mailbox for outbound cold emails.
+        3. Parses RFC 822 messages, applies cold email eligibility rules.
+        4. Ingests eligible emails into ProspectModel, EmailThreadModel, and EmailMessageModel.
+        5. Polls INBOX for incoming replies, bounces, and opt-outs.
+        6. Updates last_sync_at checkpoint.
+        """
+        creds = self._get_creds()
+        imap_host = creds.get("imap_host") or self.DEFAULT_IMAP_HOST
+        is_mock = creds.get("is_mock") or "mock" in self.account.email_address or imap_host in ["mock", "test", "localhost"]
+
+        identified_cold_emails = 0
+        scanned_count = 0
+        error_msg = None
+
+        if not is_mock and creds:
+            try:
+                imap_port = int(creds.get("imap_port") or self.DEFAULT_IMAP_PORT)
+                imap_user = creds.get("imap_username", self.account.email_address)
+                imap_pass = creds.get("imap_password", "")
+
+                imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=15)
+                imap.login(imap_user, imap_pass)
+
+                # 1. SCAN SENT MAILBOX
+                sent_folder = self.find_sent_folder(imap)
+                imap.select(f'"{sent_folder}"' if ' ' in sent_folder else sent_folder, readonly=True)
+
+                settings_model = db.query(AutomationSettingsModel).first()
+                delay_hours = settings_model.followup_delay_hours if settings_model else 72
+                suppression_emails = {s.email.lower() for s in db.query(SuppressionModel).all()}
+
+                res, data = imap.search(None, "ALL")
+                if res == "OK" and data[0]:
+                    msg_nums = data[0].split()
+                    scanned_count = len(msg_nums)
+                    # Scan most recent 50 messages
+                    for num in reversed(msg_nums[-50:]):
+                        _, msg_data = imap.fetch(num, "(RFC822)")
+                        if not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple):
+                            continue
+
+                        raw_msg = email.message_from_bytes(msg_data[0][1])
+                        msg_id = (raw_msg.get("Message-ID") or "").strip()
+                        if not msg_id:
+                            msg_id = f"<{uuid.uuid4()}@{self.account.email_address.split('@')[-1]}>"
+
+                        to_header = raw_msg.get("To", "")
+                        clean_name, clean_to = parseaddr(to_header)
+                        clean_name = self._decode_mime_header(clean_name)
+                        clean_to = clean_to.strip().lower()
+
+                        # Eligibility validations
+                        if not clean_to or "@" not in clean_to:
+                            continue
+                        if clean_to == self.account.email_address.lower():
+                            continue
+
+                        # Domain exclusions
+                        recipient_domain = clean_to.split("@")[-1]
+                        sender_domain = self.account.email_address.split("@")[-1].lower()
+                        if recipient_domain == sender_domain:
+                            continue
+
+                        # Automated mailbox exclusions
+                        user_prefix = clean_to.split("@")[0].lower()
+                        if any(k in user_prefix for k in ["noreply", "no-reply", "mailer-daemon", "postmaster", "notifications", "support", "billing", "bounce", "alert"]):
+                            continue
+
+                        if clean_to in suppression_emails or recipient_domain in suppression_emails:
+                            continue
+
+                        # Parse Subject & Body
+                        subject = self._decode_mime_header(raw_msg.get("Subject", "(No Subject)"))
+                        body_text = self._extract_body_from_msg(raw_msg)
+
+                        # Check non-cold keywords
+                        subj_lower = subject.lower()
+                        if any(kw in subj_lower for kw in ["invoice", "receipt", "verification", "password reset", "order confirmation", "statement"]):
+                            continue
+
+                        # Parse Date
+                        date_str = raw_msg.get("Date", "")
+                        sent_dt = utc_now()
+                        if date_str:
+                            try:
+                                parsed_dt = parsedate_to_datetime(date_str)
+                                if parsed_dt.tzinfo is None:
+                                    sent_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                                else:
+                                    sent_dt = parsed_dt.astimezone(timezone.utc)
+                            except Exception:
+                                sent_dt = utc_now()
+
+                        # Check if already tracked
+                        existing_thread = db.query(EmailThreadModel).filter(
+                            (EmailThreadModel.gmail_thread_id == msg_id) |
+                            (EmailThreadModel.original_message_id == msg_id) |
+                            (EmailThreadModel.gmail_original_message_id == msg_id) |
+                            (
+                                (EmailThreadModel.sending_account_id == self.account.id) &
+                                (EmailThreadModel.recipient_address == clean_to) &
+                                (EmailThreadModel.original_subject == subject)
+                            )
+                        ).first()
+
+                        if existing_thread:
+                            if not existing_thread.sending_account_id:
+                                existing_thread.sending_account_id = self.account.id
+                                db.commit()
+                            continue
+
+                        # Derive Prospect info
+                        if not clean_name or "@" in clean_name:
+                            salutation = re.search(r'(?:hi|hello|hey|dear)\s+([A-Z][a-z]+)', body_text, re.IGNORECASE)
+                            if salutation:
+                                clean_name = salutation.group(1).capitalize()
+                            else:
+                                clean_name = clean_to.split("@")[0].replace(".", " ").title()
+
+                        company = recipient_domain.split(".")[0].capitalize() if recipient_domain else "Company"
+
+                        prospect = db.query(ProspectModel).filter(ProspectModel.email == clean_to).first()
+                        if not prospect:
+                            prospect = ProspectModel(
+                                user_id=self.account.user_id,
+                                email=clean_to,
+                                name=clean_name,
+                                company=company,
+                                status="PENDING"
+                            )
+                            db.add(prospect)
+                            db.flush()
+
+                        # Follow-up timing & thread creation
+                        next_followup = sent_dt + timedelta(hours=delay_hours)
+                        initial_status = "DUE FOR FOLLOW-UP" if next_followup <= utc_now() else "PENDING"
+
+                        new_thread = EmailThreadModel(
+                            id=str(uuid.uuid4()),
+                            user_id=self.account.user_id,
+                            sending_account_id=self.account.id,
+                            prospect_id=prospect.id,
+                            email_provider="HOSTINGER",
+                            gmail_thread_id=msg_id,
+                            original_message_id=msg_id,
+                            gmail_original_message_id=msg_id,
+                            recipient_address=clean_to,
+                            original_subject=subject,
+                            original_body=body_text[:3000] if body_text else "(Hostinger Outbound Email)",
+                            original_sent_at=sent_dt,
+                            next_followup_at=next_followup,
+                            followup_count=0,
+                            status=initial_status
+                        )
+                        db.add(new_thread)
+                        db.flush()
+
+                        new_msg = EmailMessageModel(
+                            thread_record_id=new_thread.id,
+                            sending_account_id=self.account.id,
+                            gmail_message_id=msg_id,
+                            sender=self.account.email_address,
+                            recipient=clean_to,
+                            subject=subject,
+                            body=body_text[:3000] if body_text else "",
+                            message_type="OUTBOUND_INITIAL",
+                            sent_at=sent_dt
+                        )
+                        db.add(new_msg)
+
+                        act = ActivityLogModel(
+                            user_id=self.account.user_id,
+                            action="AUTO_EMAIL_TRACKED",
+                            description=f"Auto-tracked Hostinger outbound email to {clean_to} (Subject: '{subject}')"
+                        )
+                        db.add(act)
+                        identified_cold_emails += 1
+                        db.commit()
+
+                # 2. POLL INBOX FOR REPLIES ON ACTIVE THREADS
+                active_threads = db.query(EmailThreadModel).filter(
+                    EmailThreadModel.sending_account_id == self.account.id,
+                    EmailThreadModel.status.in_(["PENDING", "DUE FOR FOLLOW-UP", "FOLLOW-UP SENT"])
+                ).all()
+
+                for th in active_threads:
+                    try:
+                        self.detect_replies(th, db)
+                    except Exception:
+                        pass
+
+                imap.logout()
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[Hostinger Mailbox Synchronization Error] {e}")
+
         self.account.last_sync_at = utc_now()
         db.commit()
+
         return {
             "account_id": self.account.id,
             "email_address": self.account.email_address,
             "synchronized_at": self.account.last_sync_at.isoformat(),
-            "status": self.account.connection_status
+            "status": self.account.connection_status,
+            "identified_cold_emails": identified_cold_emails,
+            "scanned": scanned_count,
+            "error": error_msg
         }
+
+    def track_sent_message(self, message_id_or_thread_id: str, db: Session, manual: bool = True) -> Optional[EmailThreadModel]:
+        """
+        Manually tracks an email found in Hostinger Sent mailbox via Sent Explorer.
+        """
+        existing = db.query(EmailThreadModel).filter(
+            (EmailThreadModel.gmail_thread_id == message_id_or_thread_id) |
+            (EmailThreadModel.original_message_id == message_id_or_thread_id)
+        ).first()
+        if existing:
+            return existing
+
+        creds = self._get_creds()
+        if not creds:
+            return None
+
+        imap_host = creds.get("imap_host") or self.DEFAULT_IMAP_HOST
+        imap_port = int(creds.get("imap_port") or self.DEFAULT_IMAP_PORT)
+        imap_user = creds.get("imap_username", self.account.email_address)
+        imap_pass = creds.get("imap_password", "")
+
+        try:
+            imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=12)
+            imap.login(imap_user, imap_pass)
+            sent_folder = self.find_sent_folder(imap)
+            imap.select(f'"{sent_folder}"' if ' ' in sent_folder else sent_folder, readonly=True)
+
+            res, data = imap.search(None, f'(HEADER Message-ID "{message_id_or_thread_id}")')
+            if res != "OK" or not data[0]:
+                res, data = imap.search(None, "ALL")
+
+            found_msg = None
+            if res == "OK" and data[0]:
+                for num in reversed(data[0].split()[-30:]):
+                    _, msg_data = imap.fetch(num, "(RFC822)")
+                    if msg_data and msg_data[0] and isinstance(msg_data[0], tuple):
+                        parsed = email.message_from_bytes(msg_data[0][1])
+                        curr_id = parsed.get("Message-ID", "")
+                        if message_id_or_thread_id in curr_id or message_id_or_thread_id == curr_id:
+                            found_msg = parsed
+                            break
+                        if not found_msg:
+                            found_msg = parsed
+
+            imap.logout()
+
+            if not found_msg:
+                return None
+
+            clean_name, clean_to = parseaddr(found_msg.get("To", ""))
+            clean_name = self._decode_mime_header(clean_name)
+            clean_to = clean_to.strip().lower()
+            subject = self._decode_mime_header(found_msg.get("Subject", "(No Subject)"))
+            body_text = self._extract_body_from_msg(found_msg)
+
+            recipient_domain = clean_to.split("@")[-1]
+            company = recipient_domain.split(".")[0].capitalize() if recipient_domain else "Company"
+
+            prospect = db.query(ProspectModel).filter(ProspectModel.email == clean_to).first()
+            if not prospect:
+                prospect = ProspectModel(
+                    user_id=self.account.user_id,
+                    email=clean_to,
+                    name=clean_name or clean_to.split("@")[0].title(),
+                    company=company,
+                    status="PENDING"
+                )
+                db.add(prospect)
+                db.flush()
+
+            settings_model = db.query(AutomationSettingsModel).first()
+            delay_hours = settings_model.followup_delay_hours if settings_model else 72
+            sent_dt = utc_now()
+            date_str = found_msg.get("Date", "")
+            if date_str:
+                try:
+                    pdt = parsedate_to_datetime(date_str)
+                    sent_dt = pdt.replace(tzinfo=timezone.utc) if pdt.tzinfo is None else pdt.astimezone(timezone.utc)
+                except Exception:
+                    pass
+
+            next_fup = sent_dt + timedelta(hours=delay_hours)
+            status = "DUE FOR FOLLOW-UP" if next_fup <= utc_now() else "PENDING"
+
+            new_thread = EmailThreadModel(
+                id=str(uuid.uuid4()),
+                user_id=self.account.user_id,
+                sending_account_id=self.account.id,
+                prospect_id=prospect.id,
+                email_provider="HOSTINGER",
+                gmail_thread_id=message_id_or_thread_id,
+                original_message_id=message_id_or_thread_id,
+                gmail_original_message_id=message_id_or_thread_id,
+                recipient_address=clean_to,
+                original_subject=subject,
+                original_body=body_text[:3000] if body_text else "(Sent message)",
+                original_sent_at=sent_dt,
+                next_followup_at=next_fup,
+                followup_count=0,
+                status=status
+            )
+            db.add(new_thread)
+            db.flush()
+
+            new_msg = EmailMessageModel(
+                thread_record_id=new_thread.id,
+                sending_account_id=self.account.id,
+                gmail_message_id=message_id_or_thread_id,
+                sender=self.account.email_address,
+                recipient=clean_to,
+                subject=subject,
+                body=body_text[:3000] if body_text else "",
+                message_type="OUTBOUND_INITIAL",
+                sent_at=sent_dt
+            )
+            db.add(new_msg)
+
+            act = ActivityLogModel(
+                user_id=self.account.user_id,
+                action="MANUAL_EMAIL_TRACKED",
+                description=f"Manually tracked Hostinger email to {clean_to} (Subject: '{subject}')"
+            )
+            db.add(act)
+            db.commit()
+            return new_thread
+        except Exception as e:
+            print(f"[Hostinger track_sent_message error] {e}")
+            return None
 
     # 10. get_message_status
     def get_message_status(self, message_id: str, db: Session) -> Dict[str, Any]:

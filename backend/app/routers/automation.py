@@ -116,25 +116,48 @@ def reset_all_data(db: Session = Depends(get_db)):
         "message": "All dummy data removed. System is completely clean and ready for real email accounts."
     }
 
+@router.post("/sync-sent")
 @router.post("/sync-now")
 def sync_now(db: Session = Depends(get_db)):
     """
-    Forces an immediate real-time sync across all connected real email accounts,
-    polling Sent folders and Inbox for incoming replies.
+    Forces an immediate real-time sync across all connected real email accounts (Gmail, Hostinger, SMTP/IMAP),
+    polling Sent folders, identifying eligible cold outreach, creating tracked threads,
+    and inspecting INBOX for incoming replies.
     """
     from app.services.providers.factory import get_email_provider
     accounts = db.query(ConnectedEmailAccountModel).filter(
         ConnectedEmailAccountModel.connection_status.in_(["CONNECTED", "ACTIVE"])
     ).all()
+
+    total_identified = 0
     results = []
     for acc in accounts:
         try:
             prov = get_email_provider(acc)
             sync_res = prov.synchronize_mailbox(db)
-            results.append(sync_res)
+            new_cold = sync_res.get("identified_cold_emails", 0) or sync_res.get("new_tracked_count", 0)
+            total_identified += new_cold
+            results.append({
+                "account_id": acc.id,
+                "email_address": acc.email_address,
+                "provider_type": acc.provider_type,
+                "identified_cold_emails": new_cold,
+                "status": "SYNCED",
+                "details": sync_res
+            })
         except Exception as e:
-            results.append({"account": acc.email_address, "error": str(e)})
-    return {"message": "Real-time synchronization complete", "synced_accounts": results}
+            results.append({
+                "account_id": acc.id,
+                "email_address": acc.email_address,
+                "error": str(e),
+                "status": "ERROR"
+            })
+
+    return {
+        "message": f"Real-time outbound & inbound synchronization complete across {len(accounts)} mailbox(es).",
+        "identified_cold_emails": total_identified,
+        "synced_accounts": results
+    }
 
 @router.post("/seed-demo")
 def seed_demo_data(db: Session = Depends(get_db)):
