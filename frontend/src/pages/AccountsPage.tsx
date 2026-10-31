@@ -262,6 +262,35 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({ onAccountListUpdated
     }
   };
 
+  const handleSyncRealtime = async () => {
+    try {
+      setActionLoading('syncing');
+      const res = await apiClient.syncNow();
+      setAlert({ type: 'success', text: res.message || 'Real-time synchronization complete.' });
+      await loadAccounts();
+      onAccountListUpdated();
+    } catch (err: any) {
+      setAlert({ type: 'error', text: 'Sync failed: ' + err.message });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleResetData = async () => {
+    if (!confirm('Are you sure you want to remove all dummy/demo data and leave the system in a clean live state?')) return;
+    try {
+      setActionLoading('resetting');
+      const res = await apiClient.resetData();
+      setAlert({ type: 'success', text: res.message || 'All dummy data removed. System is clean.' });
+      await loadAccounts();
+      onAccountListUpdated();
+    } catch (err: any) {
+      setAlert({ type: 'error', text: 'Reset failed: ' + err.message });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-7xl pb-16">
       {/* Page Header */}
@@ -279,16 +308,27 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({ onAccountListUpdated
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Seed Demo Configuration Button */}
+          {/* Real-time Sync Now Button */}
           <button
             type="button"
-            onClick={handleSeedSixMailboxes}
-            disabled={actionLoading === 'seed-demo'}
-            className="flex items-center gap-1.5 rounded-xl border border-indigo-500/30 bg-indigo-950/30 px-3.5 py-2 text-xs font-semibold text-indigo-300 hover:bg-indigo-900/40 transition-all disabled:opacity-50"
-            title="Seeds initial configuration: 4 Gmail + 2 Hostinger/Professional SMTP/IMAP mailboxes"
+            onClick={handleSyncRealtime}
+            disabled={actionLoading === 'syncing'}
+            className="flex items-center gap-1.5 rounded-xl border border-blue-500/30 bg-blue-950/30 px-3.5 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-900/40 transition-all disabled:opacity-50"
+            title="Polls connected real mailboxes for sent emails and replies in real time"
           >
-            <Database className="h-3.5 w-3.5" />
-            <span>{actionLoading === 'seed-demo' ? 'Seeding...' : 'Seed 6 Mailboxes'}</span>
+            <RefreshCw className={`h-3.5 w-3.5 ${actionLoading === 'syncing' ? 'animate-spin' : ''}`} />
+            <span>{actionLoading === 'syncing' ? 'Syncing...' : 'Sync Mailboxes Now'}</span>
+          </button>
+
+          {/* Connect Hostinger Email Button */}
+          <button
+            type="button"
+            onClick={handleOpenHostingerPreset}
+            className="flex items-center gap-1.5 rounded-xl border border-purple-500/40 bg-purple-950/40 px-3.5 py-2 text-xs font-semibold text-purple-200 hover:bg-purple-900/50 transition-all shadow-md shadow-purple-950/40"
+            title="Connect Hostinger professional mailbox with pre-filled IMAP/SMTP host and port settings"
+          >
+            <Globe className="h-3.5 w-3.5 text-purple-400" />
+            <span>Connect Hostinger Email</span>
           </button>
 
           {/* Connect Gmail Button */}
@@ -306,26 +346,29 @@ export const AccountsPage: React.FC<AccountsPageProps> = ({ onAccountListUpdated
             <span>Connect Gmail</span>
           </button>
 
-          {/* Connect Hostinger Email Button */}
-          <button
-            type="button"
-            onClick={handleOpenHostingerPreset}
-            className="flex items-center gap-1.5 rounded-xl border border-purple-500/40 bg-purple-950/40 px-3.5 py-2 text-xs font-semibold text-purple-200 hover:bg-purple-900/50 transition-all shadow-md shadow-purple-950/40"
-            title="Connect Hostinger professional mailbox with pre-filled IMAP/SMTP host and port settings"
-          >
-            <Globe className="h-3.5 w-3.5 text-purple-400" />
-            <span>Connect Hostinger Email</span>
-          </button>
-
           {/* Connect Custom SMTP/IMAP */}
           <button
             type="button"
             onClick={handleOpenGenericSmtp}
-            className="flex items-center gap-1.5 rounded-xl bg-slate-800 border border-slate-700 px-3.5 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 transition-all"
+            className="flex items-center gap-1.5 rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-700 transition-all"
           >
             <Plus className="h-3.5 w-3.5" />
-            <span>Custom SMTP / IMAP</span>
+            <span>Custom SMTP/IMAP</span>
           </button>
+
+          {/* Clear Demo Data Button (if any accounts exist) */}
+          {accounts.length > 0 && (
+            <button
+              type="button"
+              onClick={handleResetData}
+              disabled={actionLoading === 'resetting'}
+              className="flex items-center gap-1.5 rounded-xl border border-rose-500/30 bg-rose-950/20 px-3 py-2 text-xs font-medium text-rose-300 hover:bg-rose-900/30 transition-all"
+              title="Clears any dummy demo data so the system is 100% clean for your real mailboxes"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Clear Dummy Data</span>
+            </button>
+          )}
         </div>
       </div>
 

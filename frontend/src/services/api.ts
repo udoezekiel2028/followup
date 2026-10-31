@@ -177,6 +177,16 @@ export const apiClient = {
     return res.data;
   },
 
+  resetData: async (): Promise<any> => {
+    const res = await api.post('/automation/reset-data');
+    return res.data;
+  },
+
+  syncNow: async (): Promise<any> => {
+    const res = await api.post('/automation/sync-now');
+    return res.data;
+  },
+
   // Logs
   getLogs: async (limit: number = 50, action?: string): Promise<ActivityLog[]> => {
     const res = await api.get<ActivityLog[]>('/logs', {

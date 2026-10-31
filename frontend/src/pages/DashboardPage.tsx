@@ -25,7 +25,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
   onNavigateToEmails,
 }) => {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [isSeeding, setIsSeeding] = useState<boolean>(false);
+  const [isRunningCycle, setIsRunningCycle] = useState<boolean>(false);
   const [actionAlert, setActionAlert] = useState<string | null>(null);
 
   const handleSyncSent = async () => {
@@ -42,17 +42,17 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
     }
   };
 
-  const handleSeedDemo = async () => {
+  const handleRunLiveCycle = async () => {
     try {
-      setIsSeeding(true);
+      setIsRunningCycle(true);
       setActionAlert(null);
-      const res = await apiClient.seedDemoData();
-      setActionAlert(res.message || 'Seeded 6 connected mailboxes and outreach data!');
+      const res = await apiClient.runAutomationCycle(selectedAccountId);
+      setActionAlert(`Live follow-up cycle executed in real time across active mailboxes.`);
       onRefresh();
     } catch (err: any) {
-      setActionAlert('Failed to seed demo data: ' + err.message);
+      setActionAlert('Cycle error: ' + (err.response?.data?.detail || err.message));
     } finally {
-      setIsSeeding(false);
+      setIsRunningCycle(false);
     }
   };
 
@@ -170,12 +170,13 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
             </button>
 
             <button
-              onClick={handleSeedDemo}
-              disabled={isSeeding}
-              className="flex items-center gap-2 rounded-xl border border-indigo-500/30 bg-indigo-950/40 px-3.5 py-2 text-xs font-semibold text-indigo-300 hover:bg-indigo-900/50 transition-colors disabled:opacity-50"
+              onClick={handleRunLiveCycle}
+              disabled={isRunningCycle}
+              className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-950/40 px-3.5 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/50 transition-colors disabled:opacity-50"
+              title="Executes immediate real-time reply check and follow-up sending across all connected real mailboxes"
             >
-              <Database className="h-3.5 w-3.5" />
-              <span>Seed 6 Mailboxes</span>
+              <Send className="h-3.5 w-3.5" />
+              <span>{isRunningCycle ? 'Running Cycle...' : 'Run Live Follow-Up Cycle'}</span>
             </button>
           </div>
         </div>

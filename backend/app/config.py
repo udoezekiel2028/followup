@@ -33,10 +33,10 @@ class Settings(BaseSettings):
     ]
     GMAIL_LABEL_NAME: str = "AUTO_FOLLOWUP"
 
-    # Automation Engine Defaults
+    # Automation Engine Defaults (Production Live Mode)
     DEFAULT_FOLLOW_UP_DELAY_HOURS: int = 72 # 3 days default
-    DEFAULT_TEST_MODE: bool = True # Test mode ON by default (drafts only)
-    DEFAULT_AUTO_SEND: bool = False # Auto send OFF by default
+    DEFAULT_TEST_MODE: bool = False # Production Live Mode (sends real emails)
+    DEFAULT_AUTO_SEND: bool = True # Auto-send enabled for real-time dispatch
     DEFAULT_MAX_FOLLOWUPS: int = 1
     SCHEDULER_INTERVAL_MINUTES: int = 60 # Hourly check
 

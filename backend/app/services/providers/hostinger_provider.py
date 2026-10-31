@@ -350,34 +350,26 @@ class HostingerEmailProvider(BaseEmailProvider):
 
     # 5. fetch_sent_emails
     def fetch_sent_emails(self, max_results: int = 25, db: Optional[Session] = None) -> List[Dict[str, Any]]:
-        """Queries Hostinger Sent folder or database for recent outbound cold emails."""
+        """
+        Queries Hostinger Sent folder in real-time to discover real sent outbound emails.
+        Correlates with database to indicate which conversations are currently tracked.
+        """
         creds = self._get_creds()
-        is_mock = creds.get("is_mock") or "mock" in self.account.email_address
+        is_mock = creds.get("is_mock") or "mock" in self.account.email_address or creds.get("smtp_host") in ["mock", "test"]
 
+        # Tracked message IDs in DB for correlation
+        tracked_ids = set()
         if db:
-            messages = db.query(EmailMessageModel).filter(
-                EmailMessageModel.sending_account_id == self.account.id,
-                EmailMessageModel.message_type == "OUTBOUND_INITIAL"
-            ).order_by(EmailMessageModel.sent_at.desc()).limit(max_results).all()
+            tracked = db.query(EmailThreadModel.gmail_thread_id, EmailThreadModel.original_message_id).filter(
+                EmailThreadModel.sending_account_id == self.account.id
+            ).all()
+            for th_id, orig_id in tracked:
+                if th_id: tracked_ids.add(th_id)
+                if orig_id: tracked_ids.add(orig_id)
 
-            if messages:
-                results = []
-                for m in messages:
-                    th = db.query(EmailThreadModel).filter(EmailThreadModel.id == m.thread_record_id).first()
-                    results.append({
-                        "gmail_message_id": m.gmail_message_id,
-                        "gmail_thread_id": th.gmail_thread_id if th else m.gmail_message_id,
-                        "recipient_name": th.prospect.name if (th and th.prospect) else "",
-                        "recipient_email": m.recipient,
-                        "subject": m.subject or "Outreach",
-                        "date": m.sent_at.isoformat(),
-                        "snippet": m.body[:120] if m.body else "",
-                        "is_already_tracked": True,
-                        "sending_account": self.account.email_address,
-                        "provider_type": "HOSTINGER"
-                    })
-                return results
+        items = []
 
+        # 1. Real-time live IMAP query to Hostinger Sent mailbox
         if not is_mock and creds:
             try:
                 imap_host = creds.get("imap_host") or self.DEFAULT_IMAP_HOST
@@ -387,35 +379,85 @@ class HostingerEmailProvider(BaseEmailProvider):
 
                 imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=12)
                 imap.login(imap_user, imap_pass)
-                imap.select("Sent")
 
+                # Locate Sent folder dynamically
+                sent_folder = "Sent"
+                try:
+                    status, folders = imap.list()
+                    if status == "OK":
+                        for f in folders:
+                            f_str = f.decode() if isinstance(f, bytes) else str(f)
+                            if "\\Sent" in f_str or "Sent Messages" in f_str or "Sent" in f_str:
+                                parts = f_str.split(' "/" ')
+                                if len(parts) > 1:
+                                    sent_folder = parts[1].strip('"').strip()
+                                    break
+                except Exception:
+                    pass
+
+                imap.select(sent_folder)
                 res, data = imap.search(None, "ALL")
-                items = []
                 if res == "OK" and data[0]:
                     msg_nums = data[0].split()
                     for num in reversed(msg_nums[-max_results:]):
-                        _, msg_data = imap.fetch(num, "(RFC822.HEADER)")
+                        _, msg_data = imap.fetch(num, "(RFC822)")
                         if msg_data and msg_data[0]:
                             parsed = email.message_from_bytes(msg_data[0][1])
                             msg_id = parsed.get("Message-ID", str(uuid.uuid4()))
+                            clean_to = parseaddr(parsed.get("To", ""))[1]
+                            clean_name = parsed.get("To", "").split("<")[0].strip().replace('"', '')
+
+                            # Extract snippet
+                            body_text = ""
+                            if parsed.is_multipart():
+                                for part in parsed.walk():
+                                    if part.get_content_type() == "text/plain":
+                                        body_text = part.get_payload(decode=True).decode(errors="ignore")
+                                        break
+                            else:
+                                body_text = parsed.get_payload(decode=True).decode(errors="ignore")
+
                             items.append({
                                 "gmail_message_id": msg_id,
                                 "gmail_thread_id": msg_id,
-                                "recipient_name": parsed.get("To", "").split("<")[0].strip(),
-                                "recipient_email": parseaddr(parsed.get("To", ""))[1],
+                                "recipient_name": clean_name or clean_to,
+                                "recipient_email": clean_to,
                                 "subject": parsed.get("Subject", "(No Subject)"),
                                 "date": parsed.get("Date", datetime.now().isoformat()),
-                                "snippet": "Outbound message from Hostinger Sent folder",
-                                "is_already_tracked": False,
+                                "snippet": body_text[:120].strip() if body_text else "Outbound message from Hostinger Sent folder",
+                                "is_already_tracked": msg_id in tracked_ids,
                                 "sending_account": self.account.email_address,
                                 "provider_type": "HOSTINGER"
                             })
                 imap.logout()
-                return items
+                if items:
+                    return items
             except Exception as e:
-                print(f"[Hostinger Sent Explorer] {e}")
+                print(f"[Hostinger Sent Explorer Live Query] {e}")
 
-        return []
+        # Fallback to local DB records if offline/mock or no IMAP messages
+        if db:
+            messages = db.query(EmailMessageModel).filter(
+                EmailMessageModel.sending_account_id == self.account.id,
+                EmailMessageModel.message_type == "OUTBOUND_INITIAL"
+            ).order_by(EmailMessageModel.sent_at.desc()).limit(max_results).all()
+
+            for m in messages:
+                th = db.query(EmailThreadModel).filter(EmailThreadModel.id == m.thread_record_id).first()
+                items.append({
+                    "gmail_message_id": m.gmail_message_id,
+                    "gmail_thread_id": th.gmail_thread_id if th else m.gmail_message_id,
+                    "recipient_name": th.prospect.name if (th and th.prospect) else "",
+                    "recipient_email": m.recipient,
+                    "subject": m.subject or "Outreach",
+                    "date": m.sent_at.isoformat(),
+                    "snippet": m.body[:120] if m.body else "",
+                    "is_already_tracked": True,
+                    "sending_account": self.account.email_address,
+                    "provider_type": "HOSTINGER"
+                })
+
+        return items
 
     # 6. fetch_inbox_emails
     def fetch_inbox_emails(self, max_results: int = 25, db: Optional[Session] = None) -> List[Dict[str, Any]]:

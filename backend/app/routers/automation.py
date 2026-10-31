@@ -80,6 +80,62 @@ def trigger_manual_automation_cycle(
 
     return {"cycles": summaries, "total_processed_mailboxes": len(active_accounts)}
 
+@router.post("/reset-data")
+def reset_all_data(db: Session = Depends(get_db)):
+    """
+    Clears all mock/dummy data, demo accounts, threads, messages, and logs,
+    leaving the database 100% clean and pristine for real production mailboxes.
+    """
+    db.query(FollowUpLogModel).delete()
+    db.query(EmailMessageModel).delete()
+    db.query(EmailThreadModel).delete()
+    db.query(ProspectModel).delete()
+    db.query(ActivityLogModel).delete()
+    db.query(ConnectedEmailAccountModel).delete()
+    db.commit()
+
+    # Re-initialize clean settings in live production mode
+    settings_model = db.query(AutomationSettingsModel).first()
+    if not settings_model:
+        settings_model = AutomationSettingsModel(
+            followup_delay_hours=72,
+            sending_window="09:00-17:00",
+            timezone="America/New_York",
+            maximum_followups=1,
+            auto_send_enabled=True,
+            test_mode=False
+        )
+        db.add(settings_model)
+    else:
+        settings_model.auto_send_enabled = True
+        settings_model.test_mode = False
+    db.commit()
+
+    return {
+        "success": True, 
+        "message": "All dummy data removed. System is completely clean and ready for real email accounts."
+    }
+
+@router.post("/sync-now")
+def sync_now(db: Session = Depends(get_db)):
+    """
+    Forces an immediate real-time sync across all connected real email accounts,
+    polling Sent folders and Inbox for incoming replies.
+    """
+    from app.services.providers.factory import get_email_provider
+    accounts = db.query(ConnectedEmailAccountModel).filter(
+        ConnectedEmailAccountModel.connection_status.in_(["CONNECTED", "ACTIVE"])
+    ).all()
+    results = []
+    for acc in accounts:
+        try:
+            prov = get_email_provider(acc)
+            sync_res = prov.synchronize_mailbox(db)
+            results.append(sync_res)
+        except Exception as e:
+            results.append({"account": acc.email_address, "error": str(e)})
+    return {"message": "Real-time synchronization complete", "synced_accounts": results}
+
 @router.post("/seed-demo")
 def seed_demo_data(db: Session = Depends(get_db)):
     """
